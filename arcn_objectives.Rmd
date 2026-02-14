@@ -1,0 +1,1369 @@
+---
+output:
+  word_document: default
+date: "`r Sys.Date()`"
+---
+
+```{r setup, include=FALSE}
+## Megan Tomerlin - SIP Winter 2025
+## Feb 13, 2025
+
+#### AICC Lightning Data Download Instructions ####
+# Lightning data must be downloaded annually from AICC (https://fire.ak.blm.gov/predsvcs/maps.php)
+# Check to see if someone has already downloaded and unzipped for this year
+    # Filepath: (I:\FIRE ECOLOGY\Fire History and Statistics\Fire Statistics\AICC_Historical_Lightning_2012_forward)
+# Go to AICC, Predictive Services - Maps/Imagery/Geospatial section, under Data and Metadata, +Data (zipped filegeodatabases)
+# Dowload zipfile of geodatabase. This can take a Long time (~30 minutes)
+# Store downloaded zipfile in the filepath shown above, under a subfolder labeled with the current year (year of download, NOT year of previous fire season)
+# Unzip inside current year folder
+# For example file structure refer to (I:\FIRE ECOLOGY\Fire History and Statistics\Fire Statistics\AICC_Historical_Lightning_2012_forward\2025)
+
+
+#### NOTES ####
+## General:
+# This was made using the most recent R/RStudio versions available through NPS software center in February of 2025
+# This was made using the most recent versions of all packages available through CRAN in February 2025
+# If the script does not work in the future, package/R/RStudio version issues may be part of the problem.
+
+# You must be connected to the internet and the network drives (X and I) for this to work!
+# If you are running this script on a Denali computer, go to the Filepaths chunk and edit the I Drive mapping using the commented lines there
+# Double check that the number of fires listed for each park for the current year is correct (See InFORM data wrangling notes)
+# Set filepaths with backslashes if they ever need to be edited/updated
+# Graph colors were chosen using colorblind friendly options
+# For graphs and tables made in this document, fires that start within the boundaries of the park unit and fires that burn NPS managed lands are included. Fires that start inside the boundaries and do not burn NPS managed land are included. Fires that start outside the boundaries and burn onto NPS managed lands are included. Fires that start outside the boundaries and burn into the boundaries without burning NPS managed lands are NOT included. Fire perimeter data would be necessary to identify those fires, and it seems like that is not readily available at the end of the fire season.
+
+## Year:
+# If this generates a report for an unexpected year, check your computer's date and time settings. The year is being pulled from the local computer system date
+# If there are problems with the year, overwrite variables set in chunk below
+# The year of interest must be set as a year after 2012
+
+## Session Abort:
+# My RStudio session crashes irregularly when I knit from inside the R project. Close the project and open the Rmd file in a new RStudio session to avoid this.
+# I believe this is related to rendering graphs and tables from inside a loop, but I have not found a clear cause.
+
+
+#### Troubleshooting ####
+# If the script doesn't run, check these things:
+#     Internet connection
+#     Network drive connection and mapping
+#     Network drive filepaths - filepath chunk
+#     System Datetime
+#     Package versions, RStudio/R versions
+#     Package installation issues
+# If there are still issues you can email me at mmtomerlin@charter.net! I spent a long time working on this and would be happy to help with getting it work in the future :)
+
+
+#### Packages ####
+#### Install packages that are not already installed
+# Installation can take a very long time (several minutes)
+# List of packages needed
+packages <- c("zoo", "elevatr", "retry", "officer", "knitr", "flextable", "janitor", "arcgislayers", "sf", "tidyverse", "lubridate") 
+    # Note: lubridate is part of tidyverse, but in older versions of tidyverse it needed to be loaded separately via library()
+    # Including here with the intention of expanding version compatibility ?
+# List of only packages not already installed
+packages_to_install <- packages[!packages %in% installed.packages()] 
+# Set options
+options(pkgType = "binary", # Prevents popup window asking if you would like to install from source
+        timeout = 1000, # Allows large packages like terra (needed for sf) to be installed
+        # Set CRAN repo to install packages when knitting (operates slightly different than installing in a script)
+        repos = "http://cran.rstudio.com/") 
+# Install
+install.packages(packages_to_install, dependencies = TRUE) # Dependencies = TRUE seems to help with installation
+
+#### Load packages 
+sapply(packages, library, character = TRUE)
+
+#### Setup ####
+# Set default chunk options to suppress messages and define figure properties
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE, error = FALSE, 
+                      fig.keep = "all", fig.width = 6.5, fig.height = 4.5)
+```
+
+```{r variables, results='asis'}
+#### Set variables
+### Year of Interest
+## Current year, previous year, most recent fire year - Based on system datetime (from local computer)
+current_year <- year(Sys.Date())
+previous_year <- current_year - 1
+
+## Most recent fire season
+# If the current month (from computer) is earlier than June, look at last year's data. If it is after June, look at this year's data
+most_recent_fire_season <- if_else(month(Sys.Date()) < 6,
+                                  previous_year,
+                                  current_year)
+
+## Year of interest - Set default as most_recent_fire_season
+year_of_interest <- most_recent_fire_season
+
+## Other options
+# Uncomment (remove #) and run the line below to use current year
+# year_of_interest <- current_year
+# Uncomment (remove #) and run the line below to use previous year
+# year_of_interest <- previous_year
+# Uncomment, enter year, and run the line below to replace the year of interest with any year after 2012
+# year_of_interest <- 2018
+
+## Handle year too early scenario
+# Print warning message if the year selected is pre-2012
+if (year_of_interest < 2012) {
+  cat("WARNING: The selected Year of Interest was before 2012, which is not compatible with the AICC Lightning Data. The year is being changed to 2012 (earliest available year) to be compatible with the script. Please select a year after 2012.")
+}
+
+# Coerce to 2012 to prevent errors and allow some version of the script to run
+year_of_interest <- if_else(year_of_interest < 2012, 2012, year_of_interest)
+
+# Calculate number of years to use for avg acres per year
+years_since_1950 <- (year_of_interest - 1950) + 1
+
+
+
+### NPS Units of Interest
+## All park units
+all_units <- c("Alagnak Wild River",
+               "Aniakchak National Monument and Preserve",
+               "Bering Land Bridge National Preserve",
+               "Cape Krusenstern National Monument",
+               "Denali National Park and Preserve",
+               "Gates of the Arctic National Park and Preserve",
+               "Glacier Bay National Park and Preserve",
+               "Katmai National Park and Preserve",
+               "Kenai Fjords National Park",
+               "Klondike Gold Rush National Historical Park",
+               "Kobuk Valley National Park",
+               "Lake Clark National Park and Preserve",
+               "Noatak National Preserve",
+               "Sitka National Historical Park",
+               "Wrangell-St. Elias National Park and Preserve",
+               "Yukon-Charley Rivers National Preserve")
+
+## Arctic Network
+arcn_units <- c("Bering Land Bridge National Preserve",
+                "Cape Krusenstern National Monument",
+                "Gates of the Arctic National Park and Preserve",
+                "Kobuk Valley National Park",
+                "Noatak National Preserve")
+
+## Central Alaska Network
+cakn_units <- c("Denali National Park and Preserve",
+                "Wrangell-St. Elias National Park and Preserve",
+                "Yukon-Charley Rivers National Preserve")
+
+## Southeast Alaska Network
+sean_units <- c("Glacier Bay National Park and Preserve",
+                "Klondike Gold Rush National Historical Park",
+                "Sitka National Historical Park",
+                "Wrangell-St. Elias National Park and Preserve")
+
+## Southwest Alaska Network
+swan_units <- c("Alagnak Wild River",
+                "Aniakchak National Monument and Preserve",
+                "Katmai National Park and Preserve",
+                "Kenai Fjords National Park",
+                "Lake Clark National Park and Preserve")
+
+## Set title below to include year of interest
+```
+
+---
+title: "ARCN Monitoring Objectives `r year_of_interest`"
+---
+
+All color combinations used in these graphs were chosen specifically to be colorblind friendly. Colors used are from [ColorBrewer](https://colorbrewer2.org/) and [Okabe-Ito](https://search.r-project.org/CRAN/refmans/see/html/scale_color_okabeito.html).
+
+```{r filepaths, include=FALSE}
+#### Set filepaths 
+# If folders change and need to be updated in the future, make sure to replace backslashes with forward slashes - R cannot read filepaths with backslashes
+
+#### I Drive
+### YUGA/FAC network drive mapping
+i_drive <- "I:/"
+
+### DENA network drive mapping
+## If you are on a Denali computer, the line below SHOULD be the correct drive mapping
+## Uncomment line below - Hopefully should not need to edit any other lines
+# i_drive <- "//inpyugaStorage/Resources/Fire/"
+
+
+
+### Lightning data
+# (For download instructions see "Notes" chunk above)
+# Set filepath
+lightning_filepath <- paste0(i_drive,
+                             "FIRE ECOLOGY/Fire History and Statistics/Fire Statistics/AICC_Historical_Lightning_2012_forward/",
+                             current_year,
+                             "/Historical_Lightning_2012_forward_gdb/Historical_Lightning_2012_forward.gdb")
+
+### WFMI data
+# Enter filepaths and folder names for WFMI data
+wfmi_filepath_folder <- paste0(i_drive, "FIRE ECOLOGY/Fire History and Statistics/WFMI/")
+wfmi_filepath_subfolder_excel <- "Final_WFMIExport_AllFires_1915-2019_Excel_20210408_Excel.zip"
+wfmi_filename_excel <- "474487_Excel.csv"
+wfmi_filepath_subfolder_gis <- "Final_WFMIExport_FireTypes1_2_4_1915-2019_GIS_20210408.zip"
+wfmi_filename_gis <- "474488_Gis.csv"
+
+### NPS unit outlines
+# Set filepath to unit outline data source (Data sources found in ThemeMgr under "Properties" tab)
+unit_outlines_filepath <- "X:/AKR/Statewide/cultural/akr_bnd.gdb"
+
+### InFORM FeatureServer
+# Enter URL of FeatureServer
+inform_feature_server_url <- "https://services3.arcgis.com/T4QMspbfLg3qTGWY/ArcGIS/rest/services/InFORM_FireOccurrence_Public/FeatureServer/0"
+
+### Output folder
+# This will be where the InFORM csv goes
+output_filepath <- paste0(i_drive, 
+                          "FIRE ECOLOGY/Fire History and Statistics/Fire Statistics/annual_report_and_fmp/")
+```
+
+```{r functions, include=FALSE}
+### Table theme
+# Set table format/layout options for flextable
+table_theme <- function(x) {
+  x <- font(x, fontname = "Arial", part = "all")
+  x <- fontsize(x, size = 9, part = "all")
+  x <- theme_box(x) # Add cell borders
+  x <- border_inner(x, border = fp_border_default(width = 0), part = "footer") # Remove footnote borders
+  x <- border_outer(x, border = fp_border_default(width = 0), part = "footer")
+  x <- border_outer(x, border = fp_border_default(), part = "body") # Add back in bottom border
+  x <- bold(x, i = nrow_part(x, part = "body")) # Bold totals line
+  x <- set_table_properties(x, layout = "autofit") # Automatic table width
+}
+
+### Round small
+# Create a function to round numbers to 0 decimal places if they are > 1 and to 1 decimal place if they are < 1
+round_small <- function(x) {
+  if_else(x > 1, round_half_up(x, 0), round_half_up(x, 1)) # Use round_half_up to have 0.5 go up to 1 (not default in round())
+}
+# Could potentially be replaced with format(drop0trailing=TRUE), but format() seems to change to character strings and I think we want to keep some things as numeric
+
+
+### Add Network
+# Create a column with the network of each park unit, based on vectors set above
+network <- function(x) {
+  mutate(x, network = case_when( # Add network col
+    nps_unit_name %in% arcn_units ~ "ARCN",
+    nps_unit_name %in% cakn_units ~ "CAKN",
+    nps_unit_name %in% sean_units ~ "SEAN",
+    nps_unit_name %in% swan_units ~ "SWAN",
+    .default = NA)) %>%
+  relocate(network, .after = nps_unit_name)
+}
+
+
+
+### Graphing
+# Function to set the y axis to the total_nps_acres, with commas for large numbers and nice formatting
+scale_y_nps_acres <- function(x) {
+  scale_y_continuous(name = "NPS Acres Burned",
+                     breaks = pretty(c(0, max(x$total_nps_acres))),
+                     labels = format(c(pretty(c(0, max(x$total_nps_acres)))),
+                                     big.mark = ",",
+                                     scientific = FALSE,
+                                     drop0trailing = TRUE))
+}
+
+# Function to set the x axis to calendar_year, with ticks every 5 years and angled text for legibility
+scale_x_calendar_year <- function(x) {
+  list(scale_x_continuous(name = "Year",
+                          breaks = seq(from = 1950,
+                                       to = (year_of_interest + 2),
+                                       by = 5)),
+       theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1)))
+}
+
+# Theme function to set commonly used theme elements
+my_theme <- function() {
+  theme_bw() + # Simple black and white theme
+  theme(plot.tag = element_text(face = "italic", size = 9, hjust = 0), # Italicize caption, small size, left align
+        plot.tag.position = "top", # Use tag instead of caption to position at the top - not possible with caption
+        legend.position = "bottom", # Move legend to the bottom of the plot
+        panel.grid.minor = element_blank()) # Remove minor gridlines
+}
+
+### Graphing colors
+# Not a function, but it seemed to fit best here near the graph theme
+# Okabe-Ito colors by hex codes
+yellow_color <- "#E69F00"
+blue_color <- "#0072B2"
+red_color <- "#D55E00"
+light_blue_color <- "#56B4E9"
+
+# Okabe-Ito Colors
+# yellow_color <- palette.colors(palette = "Okabe-Ito")[2]
+# blue_color <- palette.colors(palette = "Okabe-Ito")[6]
+# red_color <- palette.colors(palette = "Okabe-Ito")[7]
+# light_blue_color <- palette.colors(palette = "Okabe-Ito")[3]
+```
+
+```{r unit_outlines_wrangling, include=FALSE}
+#### NPS unit outlines ####
+## Read in data
+unit_outlines_raw <- st_read(dsn = unit_outlines_filepath, layer = "AKParks_unit_outline") # Read in as sf object
+
+## Clean column names
+unit_outlines <- clean_names(unit_outlines_raw)
+
+## Unit Names and Codes
+# Create simple table to match park names to codes
+unit_codes <- unit_outlines %>%
+  as.data.frame() %>% # Remove polygon geometry
+  select(unit_name, unit_code)
+
+## Cleanup
+# Remove intermediary objects from environment
+rm(list = c("unit_outlines_filepath", "unit_outlines_raw"))
+```
+
+```{r lightning_data_wrangling, include=FALSE}
+#### Lightning Notes ####
+# This is a very large dataset and can be a little slow to work with
+# There are 3 datetime columns in the AICC lightning data.
+  # According to Heidi Strader and Jennifer Jenkins:
+    # UTC is in UTC
+    # Local is in Alaska time
+    # Striketime is a character string version of local (AK time)
+# R is changing the datetimes when it reads them in 
+  # This is a default behavior that I don't know how to change
+  # It assumes the times are being stored in UTC and converts them to the local time of the computer
+  # This puts the AK column into some other timezone, but makes the UTC column into AK time
+# For this reason I am using the UTC column below
+# The metadata (xml file included with download) says it includes "strikes that fall within 250 km of Alaska, Yukon Territory, British Columbia, and Northwest Territories."
+
+#### Lightning ####
+## Read in data
+lightning_raw <- st_read(lightning_filepath) # Automatically reads in first layer, check with st_layers()
+
+## Clean
+lightning_clean <- lightning_raw %>%
+  clean_names() %>% # Clean colnames
+  # R is converting the UTC datetime to local time when it reads in the data. This is what we want to work with
+  mutate(localdatetime = utcdatetime,
+         # Create year and month columns from local date
+         calendar_year = year(localdatetime),
+         strike_month = month(localdatetime))
+
+## Remove cloud stroke lightning, keeping only ground strokes with the potential to start wildfires
+lightning_ground <- lightning_clean %>%
+  filter(stroketype == "GROUND_STROKE" &
+           calendar_year < (year_of_interest + 1)) %>% # Remove strikes from years beyond the year of interest
+  st_transform(3338) # Transform from WGS84 to NAD83 AK Albers for compatibility with unit outlines
+
+## Clip lightning strikes that occur within unit outlines (subset using sf)
+lightning_clip <- lightning_ground[unit_outlines, ]
+
+## Find park associated with ea<- lightning stroke - This step is a little slow (takes ~1 min)
+lightning <- lightning_clip %>%
+  # Add column with name of NPS unit
+  mutate(nps_unit_name = unit_outlines$unit_name[as.integer(st_intersects(lightning_clip, unit_outlines))]) %>%
+  as.data.frame() %>% # Save as df instead of sf object
+  select(!Shape) # Remove shape geometry column
+
+
+## Cleanup
+# Remove intermediary lightning_ objects, keeping only final lightning df
+rm(list = grep("lightning_", ls(), value = TRUE))
+
+## Subset and summarize lightning df
+lightning_summary <- lightning %>%
+  group_by(nps_unit_name, calendar_year, strike_month) %>%
+  summarize(n_strikes = n()) %>%
+  ungroup() %>%
+  complete(., nps_unit_name, calendar_year = min(calendar_year):year_of_interest, strike_month,
+           fill = list(n_strikes = 0)) %>%
+  network() # Function to add network codes, set in functions chunk above
+
+# Summarize lightning df by month
+lightning_month <- lightning_summary %>%
+  group_by(nps_unit_name, strike_month) %>%
+  summarize(n_strikes = sum(n_strikes)) %>%
+  ungroup()
+
+# Summarize lightning df by year
+lightning_year <- lightning_summary %>%
+  group_by(nps_unit_name, calendar_year) %>%
+  summarize(n_strikes = sum(n_strikes)) %>%
+  ungroup()
+
+```
+
+```{r inform_data_wrangling, include=FALSE}
+#### InFORM Notes ####
+# There is not an NPS unit associated with InFORM fire records in the InFORM attributes. That is being assigned below using the unit outlines. For fires with POO inside a unit, assigning the associated unit is straightforward. For fires that start outside NPS units but burn NPS acres, the nearest park unit is obtained. This is not definitively the park into which the fire burned, just the park that the POO is nearest to. Check the fires annually (using the notes at the bottom of this chunk) and make sure this is working as expected.
+# InFORM datetimes are stored in UTC
+  # These dates are being correctly read in from the FeatureServer
+  # Timezone is not being changed while reading in, needs to be changed to AK time in R
+# InFORM FeatureServer data comes in as WGS84, with no lat/long columns but a WGS84 geometry
+
+# Records imported into InFORM from WFMI do not include RX fires
+# For information on RX fires pre-2020, go to WFMI export. Not needed here
+
+## "There's actually a ton of junk in InFORM." -Brian Sorbel
+# The junk is currently being filtered out by only keeping WFMI-origin records for pre-2020 fires, and only IFM/WildCad/WildCadE records for fires from 2020 onward. Without this there are many duplicate records.
+# There are many records with FMIS as created by system - not sure what that is or if it should be kept
+
+# InFORM is being accessed through the Public FeatureServer by this script. If it is accessed through NIFC Inspector, or downloaded as a csv file, the columns included in the dataset are different (as of Feb 2025, may change in the future). If the InFORM data are input to this script from a different source, there may be compatibility issues based on available columns in the data.
+# There are also differences in the data types of the columns from different sources. For example, from the FeatureServer the Fire Cause columns come in as numbers that need to be translated into text. I believe in the csv the Fire Cause is already text. I have built in flexibility for this particular issue (can interpret either numeric or text values), but similar things I have not planned for could cause problems.
+
+### Read in InFORM data from export file
+# Use this option if working from InFORM .csv, or in case there is an issue accessing data from FeatureServer
+## WARNING: This may not work as expected! As mentioned above, the columns are different and I have not tested this
+# Enter filepath to .csv file in the line below using forward slashes, add # in front of "Read in Data" code lines below, remove # from these lines, and try to run again
+# inform_filepath <- "INSERT/FILEPATH/HERE/FOR/INFORM/DATA/AND/FILENAME.csv"
+# inform_raw_df <- read.csv(inform_filepath)
+
+
+#### InFORM Data ####
+## Read in data from FeatureServer online
+# Open connection to FeatureServer
+inform_raw <- arc_open(inform_feature_server_url)
+# Read data into R. This step can be slow (takes ~1 min)
+inform_raw_df <- retry(arc_select(inform_raw, # Use retry() to try again if there's an error
+                                  where = "POOState = 'US-AK'"), # Filter/Query for only AK fires to expedite
+                       when = "subscript out of bounds", # Most common error
+                       max_tries = 10, # Try 10 times before giving up
+                       interval = 5) # Wait 5 seconds between each try
+# This throws an error occasionally (Error: subscript out of bounds), possibly because of connection issues or website updates. An error will prevent the script from knitting. Using retry() allows the script to pause for a few seconds and try again if it doesn't work right away. This seems to have resolved the issue.
+
+
+#### Create csv of InFORM data for year of interest
+## Prepare export df
+# inform_year <- inform_raw_df %>%
+#   filter(CalendarYear == year_of_interest & # Filter for year of interest
+#            CreatedBySystem %in% c("ifm", "wildcad", "wildcade")) %>% # Filter out junk
+#   mutate(geom_ogc = st_transform(geometry, crs = "OGC:CRS84"), # Add converted geometry column WGS84 (code OGC:CRS84)
+#          X = st_coordinates(geom_ogc)[,1], # Extract lat/long to columns
+#          Y = st_coordinates(geom_ogc)[,2],
+#          created_by_system_keep = case_when(
+#            CalendarYear < 2020 & CreatedBySystem == "WFMI" ~ "keep",
+#            CalendarYear > 2019 & CreatedBySystem %in% c("ifm", "wildcad", "wildcade") ~ "keep",
+#            .default = "junk")) %>%
+#   filter(created_by_system_keep != "junk") %>%
+#   select(!geom_ogc) %>%  # Remove converted geometry column
+#   select(!created_by_system_keep) %>% # Remove intermediary junk column
+#   mutate(across(everything(), ~ as.character(.))) %>% # Make character to allow for NA replacement
+#   replace(is.na(.), "") %>% # Replace NA with blank for better handling in ArcPro
+#   as.data.frame() # Make df to remove geometry
+
+## Write csv
+# write.csv(inform_year, file = paste0(output_filepath, "InFORM_wildfires_and_rx_", year_of_interest, ".csv"), row.names = FALSE) 
+
+
+## Cleaning
+inform_clean <- inform_raw_df %>%
+  clean_names() %>% # Clean colnames
+  # NA Handling
+    # Replace blanks with NA values for character columns - have not had success with numeric or date columns
+  mutate(across(where(is.character), ~ na_if(., "")),
+         # Replace NA acres with 0
+         acres_nps = if_else(is.na(acres_nps), 0, acres_nps)) %>%
+  # Filter out fires with missing start/end dates
+  filter(!is.na(fire_discovery_date_time) &
+         !is.na(fire_out_date_time)) %>%
+  # Filter out "junk"
+  mutate(created_by_system_keep = case_when(
+    calendar_year < 2020 & created_by_system %in% c("WFMI") ~ "keep",
+    calendar_year > 2019 & created_by_system %in% c("ifm", "wildcad", "wildcade") ~ "keep",
+    .default = "junk")) %>%
+  filter(created_by_system_keep != "junk") %>%
+  # Change projection of InFORM points from web projection to NAD83 AK Albers to match park outline projection
+  st_transform(3338) # ESPG:3338 is the code for AK Albers NAD83 projection
+
+
+## Data Wrangling
+## Create new columns
+inform_cols <- inform_clean %>%
+  # Extract lat/long from point geometry, after converting to WGS84 coordinate reference system
+  mutate(geom_ogc = st_transform(geometry, crs = "OGC:CRS84"), # Add converted geometry column WGS84 (code OGC:CRS84)
+         latitude = st_coordinates(geom_ogc)[,1], # Extract lat/long to columns
+         longitude = st_coordinates(geom_ogc)[,2],
+         # Change fire cause imported as numeric codes to meaningful text values
+         fire_cause_id = as.character(fire_cause_id),
+         fire_cause_specific_id = as.character(fire_cause_specific_id),
+         fire_cause = case_match(
+           fire_cause_id,
+           "1" ~ "Natural",
+           "2" ~ "Undetermined",
+           "3" ~ "Human",
+           "Natural" ~ "Natural", # In case file comes in as csv with text values, keep original text values
+           "Undetermined" ~ "Undetermined",
+           "Human" ~ "Human",
+           .default = "Undetermined"), # If blank or NA, assign Undetermined value
+         # Add lightning column
+         fire_cause_lightning = case_when(
+           fire_cause_specific_id == "1" ~ "Lightning",
+           fire_cause_specific_id == "Lightning" ~ "Lightning",
+           fire_cause == "Human" ~ "Human",
+           .default = NA),
+         # Convert UTC datetimes (default InFORM storage) to local datetimes for getting month
+         fire_discovery_date_time = force_tz(fire_discovery_date_time, # Tell R that this column is UTC
+                                             tzone = "UTC"),
+         fire_discovery_date_time_ak = as.POSIXct(fire_discovery_date_time, # Convert to AK
+                                                  tz = "America/Anchorage",
+                                                  origin = "UTC",
+                                                  usetz = TRUE),
+         fire_discovery_date_time_ak = force_tz(fire_discovery_date_time_ak, # Tell R this is AK
+                                                tzone = "America/Anchorage"),
+         fire_out_date_time = force_tz(fire_out_date_time, # Repeat for out_date
+                                       tzone = "UTC"),
+         fire_out_date_time_ak = as.POSIXct(fire_out_date_time,
+                                            tz = "America/Anchorage",
+                                            origin = "UTC",
+                                            usetz = TRUE),
+         fire_out_date_time_ak = force_tz(fire_out_date_time_ak,
+                                          tzone = "America/Anchorage")) %>%
+  select(!geom_ogc)
+
+## Find park associated with each fire - This step is a little slow (takes ~1 min)
+inform_park <- inform_cols %>%
+  # Create park name columns
+  mutate(contains = as.integer(st_intersects(inform_cols, unit_outlines)), # Intermediary column
+         # Find park name for fires with POO inside park outline
+         poo_nps_unit = if_else(is.na(contains), NA, unit_outlines$unit_name[contains]),
+         nearest = as.integer(st_nearest_feature(inform_cols, unit_outlines)), # Intermediary column
+         # Find park name of nearest park for fires wtih POO outside park outline
+         nearest_nps_unit = if_else(is.na(nearest), NA, unit_outlines$unit_name[nearest]),
+         # Create nps_unit_name col to fill in nearest park for fires with poo outside a unit
+         nps_unit_name = if_else(poo_nps_unit != nearest_nps_unit & !is.na(poo_nps_unit), poo_nps_unit, nearest_nps_unit)) %>%
+  # Keep only fires that burned NPS acres or started inside the NPS boundary
+  filter(acres_nps > 0 | !is.na(poo_nps_unit))
+
+## Add elevation - This step is a little slow (takes ~1 min)
+inform_elev <- retry(get_elev_point(inform_park), # Use retry() to try multiple times if there's an error
+                     when = "Caused by error", # This is text from the error message I sometimes get here
+                     max_tries = 10, # Try 10 times before giving up
+                     interval = 10) # Wait 5 seconds between each try
+# This throws an error occasionally, possibly because of connection issues or website updates. An error will prevent the script from knitting. Using retry() allows the script to pause for a few seconds and try again if it doesn't work right away. This seems to have resolved the issue.
+
+## Save as dataframe instead of sf object
+inform <- inform_elev %>%
+  as.data.frame() %>%
+  select(!geometry) # Remove geometry column - not sure if this is necessary
+
+## Cleanup
+# Remove inform_ objects, keeping final inform df
+rm(list = grep("inform_", ls(), value = TRUE))
+
+
+#### NOTE ####
+## "Nearest_nps_unit" does not identify the park the acres actually burned in! It only finds the park nearest to the point of origin!
+# This gets what we want for now, but there could be unusual circumstances where a fire starts closer to one park but burns towards/into a different park (maybe arctic parks that share borders)
+
+## Check fires to see if nps_unit_name is correct!
+# Uncomment and run to get a subset for the year and park you want to check
+# inform_park_check <- inform %>%
+#   filter(calendar_year == year_of_interest & nps_unit_name == "Denali National Park and Preserve") %>%
+#   filter(acres_nps > 0 | !is.na(poo_nps_unit))
+# View(inform_park_check)
+
+# If the park assigned for a fire is not correct, uncomment and run the following line of code, replacing the ALL CAPS text with the correct info
+# inform[inform$UniqueFireIdentifier == UNIQUE_FIRE_ID_OF_FIRE_IN_QUESTION, "nps_unit_name"] <- "CORRECT UNIT NAME"
+
+# In the above lines, use full unit names in quotes. To ensure consistent spelling, you can copy-paste from the list below
+#                        "Alagnak Wild River"
+#                        "Aniakchak National Monument and Preserve"
+#                        "Bering Land Bridge National Preserve"
+#                        "Cape Krusenstern National Monument"
+#                        "Denali National Park and Preserve"
+#                        "Gates of the Arctic National Park and Preserve"
+#                        "Glacier Bay National Park and Preserve"
+#                        "Katmai National Park and Preserve"
+#                        "Kenai Fjords National Park"
+#                        "Klondike Gold Rush National Historical Park"
+#                        "Kobuk Valley National Park"
+#                        "Lake Clark National Park and Preserve"
+#                        "Noatak National Preserve"
+#                        "Sitka National Historical Park"
+#                        "Wrangell-St. Elias National Park and Preserve"
+#                        "Yukon-Charley Rivers National Preserve"
+```
+
+```{r wfmi_data_wrangling, include=FALSE}
+#### WFMI Notes ####
+# WFMI datetimes are stored in AK time zone
+# WFMI lat/longs are stored in the original collection datum, which varies for different fires. The corrected NAD83 coordinates can be found in a separate WFMI GIS file.
+
+#### WFMI Data ####
+### WFMI Excel (main WFMI file)
+## Read in Data
+wfmi_file_excel <- unz(paste0(wfmi_filepath_folder, wfmi_filepath_subfolder_excel), # WFMI Excel subfolder
+                       wfmi_filename_excel) # Name of csv file
+wfmi_raw <- read.csv(wfmi_file_excel, # Read in data
+                     skip = 6, # Skip document header - first 6 rows of metadata info
+                     na.strings = "") # Replace blanks with NA
+## Clean
+wfmi_clean <- wfmi_raw %>%
+  clean_names() %>% # Clean colnames
+  filter(calendar_year < 1992 & # Filter out WFMI data from 1992 onward
+           # (WFMI data from 1992-2019 has been entered into InFORM, InFORM version is considered "authoritative")
+          !is.na(start_time) & # Remove fires with missing start/out dates
+          !is.na(out_date))
+
+### WFMI GIS data - Contains corrected NAD83 coordinates
+## Read data
+wfmi_file_gis <- unz(paste0(wfmi_filepath_folder, wfmi_filepath_subfolder_gis), # WFMI GIS subfolder
+                     wfmi_filename_gis) # Name of csv file
+wfmi_raw_gis <- read.csv(wfmi_file_gis, na.strings = "") # Read in data (no header in this document)
+## Clean
+wfmi_gis <- wfmi_raw_gis %>%
+  clean_names() %>% # Clean colnames
+  select(c(fire_id, fire_name, lat_nad83, long_nad83)) # Select relevant columns
+
+
+### Add WFMI GIS data to main WFMI df
+# Assume they are EPSG:4269 (generic NAD83 code)
+    # Maybe later transform to AK Albers to match other sf objects
+wfmi_joined <- wfmi_clean %>%
+  left_join(., wfmi_gis, by = c("fire_id", "fire_name")) %>% # Add lat/long columns
+  st_as_sf(coords = c("long_nad83", "lat_nad83"), crs = 4269) # Set coordinates
+
+## Add elevation - This step is a little slow (takes ~1 min)
+# Use retry() to try multiple times if there's an error
+wfmi_elev <- retry(get_elev_point(wfmi_joined, overwrite = TRUE), # Overwrite=TRUE to write over WFMI elev codes
+                   when = "Caused by error", # This is text from the error message I sometimes get here
+                   max_tries = 10, # Try 10 times before giving up
+                   interval = 10) # Wait 5 seconds between each try
+# This throws an error occasionally, possibly because of connection issues or website updates. An error will prevent the script from knitting. Using retry() allows the script to pause for a few seconds and try again if it doesn't work right away. This seems to have resolved the issue.
+
+## Save as dataframe instead of sf object
+wfmi_sf_df <- wfmi_elev %>%
+  as.data.frame() %>%
+  select(!geometry) # Remove geometry col - Not sure if this is necessary?
+
+
+
+### Make WFMI compatible with InFORM
+# This could be done in one giant pipe, but it has been useful for me to have multiple intermediary objects for catching mistakes
+## Rename columns to match InFORM
+wfmi_rename <- wfmi_sf_df %>%
+  rename(incident_name = fire_name,
+         poo_jurisdictional_unit = reporting_unit_id,
+         incident_size = control_acres,
+         fire_cause = cause_category)
+
+## Mutate section - editing and creating new columns
+wfmi <- wfmi_rename %>%
+# Reformat dates as date objects (initially read in as character strings)
+  mutate(fire_discovery_date_time_ak = as.POSIXct(start_time, format = "%m/%d/%Y %H:%M", tz = "America/Anchorage"),
+         fire_out_date_time_ak = as.POSIXct(out_date, format = "%m/%d/%Y", tz = "America/Anchorage"),
+         # Create acres_nps column based on stats columns
+         acres_nps = case_when(
+           statistics_1_owner == 3 ~ statistics_1_acres,
+           statistics_2_owner == 3 ~ statistics_2_acres,
+           statistics_3_owner == 3 ~ statistics_3_acres,
+           statistics_4_owner == 3 ~ statistics_4_acres,
+           statistics_5_owner == 3 ~ statistics_5_acres,
+           statistics_6_owner == 3 ~ statistics_6_acres,
+           statistics_7_owner == 3 ~ statistics_7_acres,
+           statistics_8_owner == 3 ~ statistics_8_acres,
+           .default = 0),
+         # Create incident_type column
+         incident_type_category = case_match(
+           fire_type_protection_type,
+           48 ~ "RX",
+           .default = as.character(fire_type_protection_type)),
+         # Change owner code 3 to NPS
+         poo_landowner_category = case_match(
+           owner,
+           0 ~ "Foreign",
+           1 ~ "BLM",
+           2 ~ "BIA",
+           3 ~ "NPS",
+           4 ~ "USFWS",
+           5 ~ "USFS",
+           6 ~ "OthFed",
+           7 ~ "State",
+           8 ~ "Private",
+           9 ~ "Tribal",
+           10 ~ "BOR",
+           .default = as.character(owner)),
+         # Create lightning column
+         fire_cause_lightning = case_when(
+           trespass_general_cause == 1 & trespass_specific_cause == 1 ~ "Lightning",
+           fire_cause == "Human" ~ "Human",
+           .default = NA),
+         # Create nps_unit column, replacing & with "and" to match other park names and correcting Wrangel typo
+         nps_unit_name = str_replace(reporting_unit_name, "&", "and"),
+         nps_unit_name = str_replace(nps_unit_name, " - ", "-"),
+         nps_unit_name = str_replace(nps_unit_name, "Wrangel-", "Wrangell-")) %>%
+  #  Keep only fires that burned NPS acres or started inside the NPS boundary
+  filter(poo_landowner_category == "NPS" | acres_nps > 0)
+
+
+## Cleanup
+# Remove WFMI files/filepaths, remove raw and intermediary dfs
+rm(list = c(grep("wfmi_", ls(), value = TRUE)))
+```
+
+```{r wfmi_inform_merge, include=FALSE}
+#### Subset and Merge
+## Select relevant subset of data to work with
+# Set columns to be selected
+columns_of_interest <- c("incident_name",
+                         "unique_fire_identifier",
+                         "fire_code",
+                         "calendar_year",
+                         "fire_discovery_date_time_ak",
+                         "fire_out_date_time_ak",
+                         "nps_unit_name",
+                         "poo_nps_unit",
+                         "poo_jurisdictional_unit",
+                         "poo_landowner_category",
+                         "incident_type_category",
+                         "incident_size",
+                         "acres_nps",
+                         "fire_cause",
+                         "fire_cause_lightning",
+                         "elevation",
+                         "data_source")
+
+# InFORM subset
+# Use any_of() when selecting based off vector object
+# (Any_of() allows for missing columns (present in InFORM but not WFMI, for example) to be ignored, unlike all_of())
+inform_small <- inform %>%
+  mutate(data_source = "InFORM") %>%
+  select(any_of(columns_of_interest))
+# WFMI subset
+wfmi_small <- wfmi %>%
+  mutate(data_source = "WFMI") %>%
+  select(any_of(columns_of_interest))
+
+## Merge
+fires <- bind_rows(inform_small, wfmi_small) %>%
+  mutate(incident_name = str_to_title(incident_name), # Change fire names to same case (otherwise some are in all caps)
+         fire_cause = if_else(!is.na(fire_cause), fire_cause, "Undetermined")) %>% # Change NA to "Undetermined"
+  mutate(start_month = month(fire_discovery_date_time_ak), # Create column with month fire started
+         end_month = month(fire_out_date_time_ak), # Month fire ended
+         .after = fire_out_date_time_ak) %>% # Move after other dates for easy visual comparison
+  complete(., nps_unit_name, calendar_year = min(calendar_year):year_of_interest,
+         fill = list(fire_cause = "Undetermined", # Give value so Human/Natural cause is not NA
+                     poo_landowner_category = "x", # Give value so NPS fires is not NA
+                     incident_size = 0,
+                     acres_nps = 0,
+                     start_month = 0, # Flag these with a value that can be removed/counted
+                     incident_type_category = "WF")) %>%
+  left_join(., unit_codes, by = c("nps_unit_name" = "unit_name")) %>% # Add NPS unit codes
+  rename(nps_unit_code = unit_code) %>%
+  relocate(nps_unit_code, .after = nps_unit_name)
+
+## Wildfires
+wildfires <- fires %>%
+  filter(calendar_year > 1949 & calendar_year < (year_of_interest + 1)) %>% # Filter for fires 1950 to year of interest
+  filter(incident_type_category != "RX") %>%  # Remove prescribed fires
+  network() %>% # Add network codes using function defined in functions chunk above
+  # Add decade column
+  mutate(decade_prefix = as.integer(sub(x = calendar_year, ".{1}$", "")), # Remove last digit from year
+         # Create column in the format of "1950-1959"
+         # For the current decade, if it is incomplete, add a corrected label
+            # Ex: "2020-2024" if the year is 2024 or just "2030" if the year is 2030
+         decade = if_else(decade_prefix != max(decade_prefix, na.rm = TRUE),
+                               paste0(decade_prefix, "0 - ", decade_prefix, "9"),
+                               if_else(as.integer(paste0(max(decade_prefix, na.rm = TRUE), "0")) != year_of_interest,
+                                       paste0(max(decade_prefix, na.rm = TRUE), "0 - ", year_of_interest),
+                                       paste0(max(decade_prefix, na.rm = TRUE), "0")))) %>%
+  select(!decade_prefix) %>% # Remove intermediary column
+  relocate(decade, .after = calendar_year) # Move next to year for easy visual comparison
+
+## Wildfires for Graphing
+# Remove blank rows created to fill in zeros in tables
+# Not used for anything in graphs
+wildfires_graph <- wildfires %>% 
+  filter(start_month != 0)
+  
+# Not removing any intermediary objects created here - useful to be able to look at them for double checks
+```
+
+```{r arcn_graph_df, include=FALSE}
+wildfires_graph_arcn <- wildfires_graph %>% 
+  filter(network == "ARCN") %>% 
+  # Remove partial decade from 1956-1959 - misleading to graph together with other complete decades
+  mutate(decade = if_else(decade == "1950 - 1959",
+                          NA,
+                          decade),
+         nps_unit_shortened = gsub(" National.*", "", nps_unit_name))
+```
+
+## Wildfire Activity
+### Arctic Network NPS Units
+
+```{r table_arcn_units}
+#### ARCN Table
+### Prepare dataframe for table
+## Subset wildfires and lightning for year of interest
+wildfires_year_of_interest <- wildfires %>% 
+  filter(calendar_year == year_of_interest)
+
+lightning_year_of_interest <- lightning_year %>% 
+  filter(calendar_year == year_of_interest) %>% 
+  select(!calendar_year) # Remove year column, now unnecessary
+
+## Summarize
+fire_stats_df <- wildfires_year_of_interest %>% 
+  group_by(nps_unit_name) %>% # Park level summaries
+  summarize(n_wildfires = sum(start_month != 0), # Number of fires affecting NPS unit
+            n_natural = sum(fire_cause == "Natural"),
+            n_human = sum(fire_cause == "Human"),
+            n_cause = paste(sum(fire_cause == "Natural"), "/", sum(fire_cause == "Human")),
+            total_acres = round_small(sum(incident_size)), # Sum of total acres
+            nps_acres = round_small(sum(acres_nps, na.rm = TRUE)), # Total acres
+            avg_total_acres = round_small(mean(incident_size)), # Average acres/year
+            max_total_acres = round_small(max(incident_size)), # Largest fire numeric value
+            max_total_acres_table = if_else(
+              max(incident_size) > 0, # Largest fire appended with name for table
+              paste0(format(round_small(max(incident_size)),
+                            big.mark = ",", scientific = FALSE), # Add commas
+                     " (", incident_name[which.max(incident_size)], ")"), # Add name
+              "0"), # For rows with 0 nps acres, max fire is 0 with no name or year
+            # Calculate fire season length in days
+            season_duration = (as.integer(as.Date(max(fire_out_date_time_ak)) - 
+                               as.Date(format(min(fire_discovery_date_time_ak), 
+                                              format = "%Y-%m-%d"))) + 1)
+            ) %>%
+  ungroup() %>% # Always ungroup after grouping
+  left_join(lightning_year_of_interest, by = c("nps_unit_name")) %>%  # Add lightning strikes
+  mutate(across(where(is.numeric), ~ if_else(is.na(.), 0, .))) # Change NA to 0
+
+## ARCN only dfs
+wildfires_year_of_interest_arcn <- filter(wildfires_year_of_interest, nps_unit_name %in% arcn_units)
+fire_stats_df_arcn <- filter(fire_stats_df, nps_unit_name %in% arcn_units)
+
+## Add totals row
+# There might be a better way to do this?
+fire_stats_df_arcn_totals <- fire_stats_df_arcn %>% 
+  bind_rows(summarize(., across(where(is.numeric), ~ round_half_up(sum(.))), # Create totals row with rounded totals
+                         across(where(is.character), ~ "-"))) %>% # Fill in dashes for character columns
+  mutate(nps_unit_name = gsub("National.*", "", nps_unit_name), # Shorten unit names
+         across(where(is.numeric), ~ format(., big.mark = ",", # Add commas to large numbers
+                                            scientific = FALSE, # Prevent formatting numbers in scientific notation
+                                            drop0trailing = TRUE))) # Remove trailing 0s
+
+# Rename first cell of last column to Total instead of dash
+fire_stats_df_arcn_totals[nrow(fire_stats_df_arcn_totals), 1]  <- "All Units"
+
+# Calculate Natural/Human cause column
+fire_stats_df_arcn_totals[nrow(fire_stats_df_arcn_totals), "n_cause"]  <- paste0(
+  fire_stats_df_arcn_totals[nrow(fire_stats_df_arcn_totals), "n_natural"], 
+  " / ",
+  fire_stats_df_arcn_totals[nrow(fire_stats_df_arcn_totals), "n_human"])
+
+# Calculate average for Total row of Avg Fire Size, instead of Sum
+fire_stats_df_arcn_totals[nrow(fire_stats_df_arcn_totals), "avg_total_acres"] <- format(
+  round_small(sum(as.numeric(
+    str_replace_all(c(fire_stats_df_arcn$avg_total_acres), ",", ""))) /
+      length(unique(fire_stats_df_arcn$nps_unit_name))),
+  big.mark = ",", 
+  scientific = FALSE, 
+  drop0trailing = TRUE)
+
+# Largest fire out of any park
+fire_stats_df_arcn_totals[nrow(fire_stats_df_arcn_totals), "max_total_acres_table"] <- if_else(
+  max(fire_stats_df$max_total_acres) > 0, # Largest fire appended with name for table
+  paste0(format(round_small(max(fire_stats_df_arcn$max_total_acres)),
+                big.mark = ",", scientific = FALSE), # Add commas
+         " (", # Add name
+         wildfires_year_of_interest_arcn$incident_name[which( # Match fire size to name in wildfire df
+           round_small(wildfires_year_of_interest_arcn$incident_size) == 
+             max(fire_stats_df_arcn$max_total_acres))], 
+         ")"), 
+  "0") # For rows with 0 nps acres, max fire is 0 with no name or year
+
+# Season duration
+fire_stats_df_arcn_totals[nrow(fire_stats_df_arcn_totals), "season_duration"] <- format(
+  as.integer(as.Date(max(wildfires_year_of_interest_arcn$fire_out_date_time_ak, 
+                         na.rm = TRUE)) - 
+    as.Date(format(min(wildfires_year_of_interest_arcn$fire_discovery_date_time_ak, 
+                       na.rm = TRUE), 
+                   format = "%Y-%m-%d"))) + 1)
+
+# Remove unecessary columns
+fire_stats_df_arcn_totals <- fire_stats_df_arcn_totals %>%
+  select(!n_natural) %>% 
+  select(!n_human) %>% 
+  select(!max_total_acres)
+
+## Create table
+fire_stats_arcn <- fire_stats_df_arcn_totals %>% 
+  flextable() %>%
+  # Create meaningful text column names
+  set_header_labels(values = setNames(c("NPS Unit", # Use setNames() to associate name with each column
+                                        "Number of Wildfires",
+                                        "Number of Fires by Cause (Natural/ Human)",
+                                        "Total Acres Burned",
+                                        "NPS Acres Burned",
+                                        "Mean Fire Size (acres)",
+                                        "Largest Fire (acres and name)",
+                                        "Season Duration (days)",
+                                        "Number of Lightning Strikes"),
+                                      colnames(fire_stats_df_arcn_totals))) %>% 
+  # Add caption matching format of FMP tables
+  set_caption(as_paragraph(as_chunk( # These flextable functions enable italics, size, color options
+    paste0(year_of_interest,
+           " Wildfire activity in ARCN NPS units. ",
+           "Number of fires includes fires that started ",
+           "within the boundaries of the park unit, ",
+           "or burned NPS managed lands. ",
+           "NPS acres burned are based on NPS land ownership. ",
+           "Fire data from InFORM. Lightning data from AICC."),
+    props = fp_text_default(font.size = 9, color = "gray40", italic = TRUE))),
+    fp_p = fp_par(text.align = "left"), # Align caption left
+    align_with_table = FALSE) %>% # Allow fp_p (line above) to override table alignment
+  table_theme() %>% # Apply theme settings defined above ("functions" chunk)
+  paginate(init = TRUE, hdr_ftr = TRUE) # Prevent table from being printed on multiple pages
+
+## Print
+fire_stats_arcn
+
+
+## Cleanup
+# Remove all table objects
+rm(list = grep("fire_stats_", ls(), value = TRUE))
+```
+
+\newpage
+## Current year compared with mean
+### graph from season summary
+
+```{r yearly_mean_yr}
+## Subset data
+yearly_mean_df_unit <- wildfires_graph_arcn %>% 
+  # Get summary values for each year
+  group_by(calendar_year, nps_unit_code) %>% 
+  summarize(n_fires = n(),
+            total_nps_acres = round_small(sum(acres_nps, na.rm = TRUE))) %>%
+  ungroup() %>% 
+  # Take avg for each park across years before year_of_interest
+  group_by(nps_unit_code) %>% 
+  summarize(mean_fires = round_small(sum(n_fires[which(calendar_year != year_of_interest)]) / years_since_1950),
+            mean_nps_acres = round_small(sum(total_nps_acres[which(calendar_year != year_of_interest)]) / years_since_1950)) %>% 
+  ungroup()
+
+## Subset data again for year of interest only
+yearly_mean_yr_df_unit <- wildfires_graph_arcn %>% 
+  filter(calendar_year == year_of_interest) %>% 
+  group_by(nps_unit_code) %>% 
+  summarize(n_fires = n(),
+            total_nps_acres = round_small(sum(acres_nps, na.rm = TRUE))) %>%
+  ungroup() %>% 
+  # Join values for year of interest with yearly averages
+  right_join(., yearly_mean_df_unit, by = "nps_unit_code") %>% 
+  # Change NAs to 0s
+  replace_na(list(n_fires = 0, total_nps_acres = 0)) %>% 
+  ## Create a column with pos/neg/zero value to assign colors in the graph
+  # Set it as a factor to control legend order
+  mutate(pos = factor(if_else((mean_nps_acres - total_nps_acres) > 0,
+                              "negative",
+                              if_else((mean_nps_acres - total_nps_acres) < 0,
+                                      "positive",
+                                      "zero")),
+                      levels = c("zero", "negative", "positive")),
+         # Choose highest value between mean/total to use when setting axis breaks
+         axis = if_else(mean_nps_acres > total_nps_acres,
+                        mean_nps_acres,
+                        total_nps_acres))
+
+## Graph
+yearly_mean_yr_arcn <- ggplot(data = yearly_mean_yr_df_unit, 
+                         aes(x = nps_unit_code, y = total_nps_acres,
+                             # Color code by pos/neg/zero column
+                             group = pos, color = pos)) +
+  # Geom segment for lines between mean and year dot
+  geom_segment(aes(x = nps_unit_code, 
+                   xend = nps_unit_code,
+                   y = mean_nps_acres, 
+                   yend = total_nps_acres),
+               linewidth = 1.5) +
+  # Point for year of interest
+  geom_point(size = 3.5) +
+  # Point for mean - set color to same color as zero (aka no change, same as mean) here
+  geom_point(aes(y = mean_nps_acres, color = "zero"),
+             size = 2) +
+  scale_color_manual(name = NULL,
+                     values = c("zero" = yellow_color,
+                                "negative" = blue_color, 
+                                "positive" = red_color),
+                     labels = c("zero" = "Avg",
+                                "negative" = "Fewer than avg", 
+                                "positive" = "More than avg")) +
+  scale_y_continuous(name = "ARCN Acres Burned",
+                     breaks = pretty(c(0, max(yearly_mean_yr_df_unit$axis))),
+                     labels = format(c(pretty(c(0, max(yearly_mean_yr_df_unit$axis)))),
+                                     big.mark = ",",
+                                     scientific = FALSE,
+                                     drop0trailing = TRUE)) +
+  labs(title = paste(year_of_interest, "Compared with Average"),
+       x = "ARCN Unit Code") +
+  my_theme() +
+  # Decrease spacing to fit legend horizontally
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1), 
+        legend.text = element_text(margin = margin(r = 0.75)))
+
+yearly_mean_yr_arcn
+```
+
+
+\newpage
+## Fire History
+### Bar Graphs
+
+```{r fig_eleven_unit_acres_arcn}
+## Subset data and summarize
+fmp_fig_eleven_df_unit_arcn <- wildfires_graph_arcn %>%
+  filter(!is.na(decade)) %>% 
+  group_by(calendar_year, nps_unit_code) %>% 
+  summarize(n_fires = n(),
+            total_nps_acres = round_small(sum(acres_nps, na.rm = TRUE))) %>%
+  ungroup()
+
+## Subset data for axis
+# Need different dataset to set axis values when using a stacked bar graph
+  # The summary data will have smaller values than the stacked bars
+fmp_fig_eleven_acres_df <- wildfires_graph_arcn %>% 
+  group_by(calendar_year) %>% 
+  summarize(n_fires = n(),
+            total_nps_acres = round_small(sum(acres_nps, na.rm = TRUE))) %>%
+  ungroup()
+
+
+## Graph 
+fmp_fig_eleven_unit_acres_arcn <- fmp_fig_eleven_df_unit_arcn %>% 
+  ggplot(aes(x = calendar_year, y = total_nps_acres)) +
+  geom_col(aes(fill = nps_unit_code)) +
+  # Set colors to Okabe-Ito, specifying 2:6 to remove black as default first color
+  scale_fill_manual(name = "NPS Unit", 
+                    values = palette.colors(palette = "Okabe-Ito")[2:6]) +
+  labs(title = "NPS Acres Burned",
+       tag = paste(str_wrap(paste0("NPS acres burned are based on NPS land ownership.",
+                                   " Fire data from WFMI and InFORM 1960 - ",
+                                   year_of_interest, "."), 
+                            width = 105), # Str_wrap to limit width of lines
+                   "\n")) + # \n to add space between caption and title
+  my_theme() +
+  scale_y_nps_acres(fmp_fig_eleven_acres_df) +
+  scale_x_calendar_year(fmp_fig_eleven_df_unit_arcn)
+
+fmp_fig_eleven_unit_acres_arcn
+```
+
+```{r fig_eleven_unit_n_fire_arcn}
+## Subset data and summarize
+fmp_fig_eleven_df_unit_arcn <- wildfires_graph_arcn %>%
+  filter(!is.na(decade)) %>% 
+  group_by(calendar_year, nps_unit_code) %>% 
+  summarize(n_fires = n(),
+            total_nps_acres = round_small(sum(acres_nps, na.rm = TRUE))) %>%
+  ungroup()
+
+## Subset data for axis
+# Need different dataset to set axis values when using a stacked bar graph
+  # The summary data will have smaller values than the stacked bars
+fmp_fig_eleven_acres_df <- wildfires_graph_arcn %>% 
+  group_by(calendar_year) %>% 
+  summarize(n_fires = n(),
+            total_nps_acres = round_small(sum(acres_nps, na.rm = TRUE))) %>%
+  ungroup()
+
+
+## Graph 
+fmp_fig_eleven_unit_n_fire_arcn <- fmp_fig_eleven_df_unit_arcn %>% 
+  ggplot(aes(x = calendar_year, y = n_fires)) +
+  geom_col(aes(fill = nps_unit_code)) +
+  # Set colors to Okabe-Ito
+  scale_fill_manual(name = "NPS Unit", 
+                    values = palette.colors(palette = "Okabe-Ito")[2:6]) +
+  labs(title = "Number of Fires",
+       tag = paste(str_wrap(paste0("Number of fires includes fires that started ",
+                                   "within park unit boundaries, ",
+                                   "or burned NPS managed lands.",
+                                   " Fire data from WFMI and InFORM 1960 - ",
+                                   year_of_interest, "."), 
+                            width = 105), # Str_wrap to limit width of lines
+                   "\n"), # \n to add space between caption and title
+       y = "Number of Fires") +
+  my_theme() +
+  scale_x_calendar_year(fmp_fig_eleven_df_unit_arcn)
+
+fmp_fig_eleven_unit_n_fire_arcn
+```
+
+```{r fig_eleven_unit_decade_arcn}
+## Subset data and summarize
+fmp_fig_eleven_df_unit_decade_arcn <- wildfires_graph_arcn %>%
+  filter(!is.na(decade)) %>% 
+  group_by(decade, nps_unit_shortened) %>% 
+  summarize(n_fires = n(),
+            total_nps_acres = round_small(sum(acres_nps, na.rm = TRUE))) %>%
+  ungroup()
+
+## Subset data for axis
+# Need different dataset to set axis values when using a stacked bar graph
+  # The summary data will have smaller values than the stacked bars
+fmp_fig_eleven_decade_df <- wildfires_graph_arcn %>% 
+  group_by(decade) %>% 
+  summarize(n_fires = n(),
+            total_nps_acres = round_small(sum(acres_nps, na.rm = TRUE))) %>%
+  ungroup()
+
+
+## Graph 
+fmp_fig_eleven_unit_decade_arcn <- fmp_fig_eleven_df_unit_decade_arcn %>% 
+  ggplot(aes(x = decade, y = total_nps_acres)) +
+  geom_col(aes(fill = nps_unit_shortened)) +
+  # Set axis breaks using axis df, with function defined in functions chunk
+  scale_y_nps_acres(fmp_fig_eleven_decade_df) +
+    # Set colors to Okabe-Ito
+  scale_fill_manual(name = "NPS Unit", 
+                    values = palette.colors(palette = "Okabe-Ito")[2:6]) +
+  labs(title = "NPS Acres Burned by Decade and Unit",
+       tag = paste(str_wrap(paste0("NPS acres burned are based on NPS land ownership.",
+                                   " Fire data from WFMI and InFORM 1960 - ",
+                                   year_of_interest, ".",
+                                   " The most recent decade may not be a full 10-year decade, ",
+                                   "which should be considered when comparing ",
+                                   "values to other full decades."), 
+                            width = 105), # Str_wrap to limit width of lines
+                   "\n"), # \n to add space between caption and title
+       x = "Decade") + # X Axis label
+  my_theme() +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1),
+        legend.position = "right")
+
+fmp_fig_eleven_unit_decade_arcn
+```
+
+```{r fig_eleven_pt_bar}
+## Subset data
+fmp_fig_eleven_df_arcn <- wildfires_graph_arcn %>% 
+  group_by(nps_unit_shortened) %>% 
+  summarize(n_fires = n(),
+            total_nps_acres = round_small(sum(acres_nps, na.rm = TRUE))) %>%
+  ungroup()
+
+## Graph
+# Set max_acres = 1 for units where max_acres would otherwise be 0 
+  # (This is not necessary in lightning data above because only one unit (Sitka) has no lightning and it is removed from the df)
+# Set ahead of graph pipe because it gets used multiple times throughout the pipe
+max_nps_acres <- if_else(max(fmp_fig_eleven_df_arcn$total_nps_acres) > 0,
+                         max(fmp_fig_eleven_df_arcn$total_nps_acres), 
+                         1)
+
+# Set scale factor for graphing with 2 y axis scales
+scale_factor_fig_eleven <- max(fmp_fig_eleven_df_arcn$n_fires) / max_nps_acres
+
+# Graph
+fmp_fig_eleven_pt_bar_arcn <- ggplot(fmp_fig_eleven_df_arcn, aes(x = nps_unit_shortened)) +
+  geom_col(aes(y = total_nps_acres * scale_factor_fig_eleven,
+               color = "ribbon_fill"),
+           fill = "#fec44f") +
+  geom_point(aes(y = n_fires, color = "col_fill"), size = 3.5) +
+  scale_color_manual(name = NULL, 
+                    values = c("ribbon_fill" = "#fec44f", 
+                               "col_fill" = "#993404"), # Colorblind friendly colors
+                    labels = c("ribbon_fill" = "NPS Acres Burned", 
+                               "col_fill" = "Number of Fires")) +
+  # Wrap x axis tick labels so they fit better
+  scale_x_discrete(labels = str_wrap(fmp_fig_eleven_df_arcn$nps_unit_shortened, 
+                                     width = 15)) +
+  scale_y_continuous(name = "Number of Fires", 
+                     breaks = pretty(c(0, max(fmp_fig_eleven_df_arcn$n_fires))),
+                     labels = format(c(pretty(c(0, max(fmp_fig_eleven_df_arcn$n_fires)))),
+                                     big.mark = ",",
+                                     scientific = FALSE,
+                                     drop0trailing = TRUE),
+                     sec.axis = sec_axis(~./scale_factor_fig_eleven, 
+                                         name = "NPS Acres Burned",
+                                         breaks = pretty(c(0, max_nps_acres)),
+                                         labels = format(c(pretty(c(0, max_nps_acres))), 
+                                                         big.mark = ",", 
+                                                         scientific = FALSE,
+                                                         drop0trailing = TRUE))) +
+  labs(title = "NPS Acres Burned and Number of Fires by Unit - Cumulative",
+       tag = paste(str_wrap(paste0("Number of fires includes fires that started ",
+                                   "within park unit boundaries, ",
+                                   "or burned NPS managed lands. ",
+                                   "Acres burned are based on NPS land ownership.",
+                                   " Fire data from WFMI and InFORM ",
+                                   min(wildfires_graph_arcn$calendar_year),
+                                   " - ",
+                                   year_of_interest, "."), 
+                            width = 105), # Str_wrap to limit width of lines
+                   "\n"), # \n to add space between caption and title
+       x = "NPS Unit") + # X Axis label
+  my_theme()
+
+fmp_fig_eleven_pt_bar_arcn
+```
+
+### Boxplots
+
+```{r fig_eleven_unit_decade_arcn_box}
+## Data
+box_df <- wildfires_graph_arcn %>%
+  filter(!is.na(decade)) %>% 
+  group_by(calendar_year, decade) %>% 
+  summarize(n_fires = n(),
+            total_nps_acres = sum(acres_nps, na.rm = TRUE)) %>% 
+  ungroup()
+
+
+## Graph 
+fmp_fig_eleven_unit_decade_arcn_box <- box_df %>% 
+  ggplot(aes(x = decade, y = total_nps_acres)) +
+  geom_boxplot(fill = "#fec44f") +
+  scale_y_nps_acres(box_df) +
+  labs(title = "NPS Acres Burned by Decade",
+       tag = paste(str_wrap(paste0("NPS acres burned are based on NPS land ownership.",
+                                   " Fire data from WFMI and InFORM 1960 - ",
+                                   year_of_interest, ".",
+                                   " The most recent decade may not be a full 10-year decade, ",
+                                   "which should be considered when comparing ",
+                                   "values to other full decades."), 
+                            width = 105), # Str_wrap to limit width of lines
+                   "\n"), # \n to add space between caption and title
+       x = "Decade") + # X Axis label
+  guides(fill = guide_legend(title = "NPS Unit")) + 
+  my_theme() +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1))
+
+fmp_fig_eleven_unit_decade_arcn_box
+```
+
+```{r fig_eleven_unit_decade_arcn_box_n_fires}
+
+box_n_fires_df <- wildfires_graph_arcn %>%
+  filter(!is.na(decade)) %>% 
+  group_by(calendar_year, decade) %>% 
+  summarize(n_fires = n()) %>% 
+  ungroup()
+
+
+## Graph 
+fmp_fig_eleven_unit_decade_arcn_box_n_fires <- box_n_fires_df %>% 
+  ggplot(aes(x = decade, y = n_fires)) +
+  geom_boxplot(fill = "#fec44f") +
+  labs(title = "Number of Fires by Decade",
+       tag = paste(str_wrap(paste0("Number of fires includes fires that started ",
+                                   "within park unit boundaries, ",
+                                   "or burned NPS managed lands.",
+                                   " Fire data from WFMI and InFORM 1960 - ",
+                                   year_of_interest, ".",
+                                   " The most recent decade may not be a full 10-year decade, ",
+                                   "which should be considered when comparing ",
+                                   "values to other full decades."), 
+                            width = 105), # Str_wrap to limit width of lines
+                   "\n"), # \n to add space between caption and title
+       x = "Decade",
+       y = "Number of Fires") + # Axis labels
+  guides(fill = guide_legend(title = "NPS Unit")) + 
+  my_theme() +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1))
+
+fmp_fig_eleven_unit_decade_arcn_box_n_fires
+```
+
+### Moving Averages
+#### 10 Year Average
+
+```{r rolling_avg_acres10}
+## Data
+nps_acres_roll_avg_df <- wildfires_graph_arcn %>% 
+  # Calculate fires/acres per year
+  group_by(calendar_year) %>% 
+  summarize(n_fires = n(),
+            total_nps_acres = sum(acres_nps, na.rm = TRUE)) %>%
+  ungroup() %>%
+  # Calculate 5 and 10 yr rolling averages using rollmean() from zoo package
+    # "k" sets the increment to use for the calculation
+    # The first "k" rows will be blank because there are not enough points yet to calculate a k mean
+    # align=right makes sure values go to the end of the df, with the blanks at the beginning
+  mutate(acres_roll10 = rollmean(total_nps_acres, k = 10, fill = NA, align = "right"),
+         n_roll10 = rollmean(n_fires, k = 10, fill = NA, align = "right"),
+         acres_roll5 = rollmean(total_nps_acres, k = 5, fill = NA, align = "right"),
+         n_roll5 = rollmean(n_fires, k = 5, fill = NA, align = "right"))
+
+## Graph
+roll_avg_acres10 <- nps_acres_roll_avg_df %>% 
+  ggplot(aes(x = calendar_year, y = total_nps_acres)) +
+  geom_line(aes(y = acres_roll10, color = "10 Year Moving Average"),
+            linewidth = 1) +
+  geom_point(aes(color = "ARCN Total"), size = 1.8) +
+  scale_color_manual(name = NULL,
+                     # Set Okabe-Ito colorblind friendly colors
+                     values = c("ARCN Total" = "#000000",
+                                "10 Year Moving Average" = "#0072B2")) +
+  guides(color = guide_legend(reverse = TRUE)) + # Put points first in legend
+  my_theme() +
+  scale_y_nps_acres(nps_acres_roll_avg_df) +
+  scale_x_calendar_year(nps_acres_roll_avg_df) +
+  labs(title = "NPS Acres Burned",
+       tag = paste(str_wrap(paste0("NPS acres burned are based on NPS land ownership.",
+                                   " Fire data from WFMI and InFORM ",
+                                   min(wildfires_graph_arcn$calendar_year),
+                                   " - ",
+                                   year_of_interest, "."), 
+                            width = 105), # Str_wrap to limit width of lines
+                   "\n")) # \n to add space between caption and title
+
+roll_avg_acres10
+```
+
+
+```{r rolling_avg_n_fires10}
+roll_avg_n_fires10 <- nps_acres_roll_avg_df %>% 
+  ggplot(aes(x = calendar_year, y = n_fires)) +
+  geom_line(aes(y = n_roll10, color = "10 Year Moving Average"), linewidth = 1) +
+  geom_point(aes(color = "ARCN Total"), size = 1.8) +
+  scale_color_manual(name = NULL,
+                     # Set Okabe-Ito colorblind friendly colors
+                     values = c("ARCN Total" = "#000000",
+                                "10 Year Moving Average" = "#0072B2")) +
+  guides(color = guide_legend(reverse = TRUE)) + # Put points first in legend
+  my_theme() +
+  scale_x_calendar_year(nps_acres_roll_avg_df) +
+  labs(title = "Number of Fires",
+       tag = paste(str_wrap(paste0("Number of fires includes fires that started ",
+                                   "within park unit boundaries, ",
+                                   "or burned NPS managed lands. ",
+                                   "Acres burned are based on NPS land ownership.",
+                                   " Fire data from WFMI and InFORM ",
+                                   min(wildfires_graph_arcn$calendar_year),
+                                   " - ",
+                                   year_of_interest, "."),
+                            width = 105), # Str_wrap to limit width of lines
+                   "\n"), # \n to add space between caption and title
+       y = "Number of Fires")
+
+roll_avg_n_fires10
+```
+
+#### 10 Year and 5 Year Averages
+
+```{r rolling_avg_acres5}
+roll_avg_acres5 <- roll_avg_acres10 +
+  # Adding additional layers onto same graph made above with only 10 yr avg
+  geom_line(aes(y = acres_roll5, color = "5 Year Moving Average"), 
+            linewidth = 1, 
+            # Linetype 31: dashes of length 3 with space of length 1 in between
+              # I messed around with other custom dash options and decided this looked clearest
+            linetype = "31") + 
+  scale_color_manual(name = NULL,
+                     # Set Okabe-Ito colorblind friendly colors
+                     values = c("ARCN Total" = "#000000",
+                                "10 Year Moving Average" = "#0072B2",
+                                "5 Year Moving Average" = "#56B4E9"))
+
+roll_avg_acres5
+```
+
+```{r rolling_avg_n_fires5}
+roll_avg_n_fires5 <- roll_avg_n_fires10 +
+  geom_line(aes(y = n_roll5, color = "5 Year Moving Average"), 
+            linewidth = 1, linetype = "31") +
+  scale_color_manual(name = NULL,
+                     # Set Okabe-Ito colorblind friendly colors
+                     values = c("ARCN Total" = "#000000",
+                                "10 Year Moving Average" = "#0072B2",
+                                "5 Year Moving Average" = "#56B4E9"))
+
+roll_avg_n_fires5
+```
+
+
